@@ -1,0 +1,67 @@
+name: salma
+services:
+  redis:
+    image: redis:7-alpine
+    ports: ["127.0.0.1:6380:6379"]
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: ["salma_redis:/data"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: salma
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-salma_local}
+      POSTGRES_DB: salma
+    ports: ["127.0.0.1:5433:5432"]
+    volumes: ["salma_db:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U salma -d salma"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  api:
+    build:
+      context: .
+      args: {INSTALL_KNOWLEDGE: "${INSTALL_KNOWLEDGE:-false}"}
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://salma:${POSTGRES_PASSWORD:-salma_local}@db:5432/salma
+      REDIS_URL: redis://redis:6379/0
+      UPLOADS_DIR: /uploads
+    command: ["sh", "-c", "alembic upgrade head && uvicorn salma.api:app --host 0.0.0.0 --port 8000 --no-access-log"]
+    ports: ["127.0.0.1:8000:8000"]
+    volumes: ["salma_models:/models", "salma_uploads:/uploads"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 5s
+      timeout: 4s
+      retries: 20
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+  worker:
+    build:
+      context: .
+      args: {INSTALL_KNOWLEDGE: "${INSTALL_KNOWLEDGE:-false}"}
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://salma:${POSTGRES_PASSWORD:-salma_local}@db:5432/salma
+      REDIS_URL: redis://redis:6379/0
+      UPLOADS_DIR: /uploads
+    command: ["python", "-m", "salma.worker"]
+    volumes: ["salma_models:/models", "salma_uploads:/uploads"]
+    depends_on:
+      api: {condition: service_healthy}
+  console:
+    build: ./frontend
+    ports: ["127.0.0.1:5173:80"]
+    depends_on: [api]
+volumes:
+  salma_db:
+  salma_models:
+  salma_redis:
+  salma_uploads:

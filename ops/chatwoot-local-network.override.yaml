@@ -1,0 +1,11 @@
+# Opt-in for trusted, local Docker deployments only. Not loaded by Salma compose.
+# Allows Chatwoot SafeFetch to reach private-network services, including Salma
+# at host.docker.internal:8000 and Evolution at host.docker.internal:18080.
+# This applies to all SafeFetch calls, not just those two destinations.
+services:
+  rails:
+    environment:
+      SAFE_FETCH_ALLOW_PRIVATE_NETWORK: "true"
+  sidekiq:
+    environment:
+      SAFE_FETCH_ALLOW_PRIVATE_NETWORK: "true"

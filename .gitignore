@@ -1,0 +1,16 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+.pytest-tmp/
+.model-cache/
+.pdf-tools/
+tmp/
+.ruff_cache/
+.uv-cache/
+node_modules/
+frontend/dist/
+data/uploads/
+data/local-access.json*
+data/provider-access.json
+*.log

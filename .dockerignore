@@ -1,0 +1,14 @@
+.venv
+.uv-cache
+.model-cache
+.pdf-tools
+tmp
+.env
+data/local-access.json*
+data/provider-access.json
+data/uploads
+frontend/node_modules
+frontend/dist
+__pycache__
+.pytest_cache
+.git
