@@ -102,6 +102,9 @@ def validate_config(value):
         for name in ("name_en", "name_ar"):
             if name in entry:
                 bounded_text(entry[name], name, 200)
+        for description in ("description", "description_en", "description_ar"):
+            if description in entry:
+                bounded_text(entry[description], description, 1000)
         if entry["id"] in ids:
             raise ValueError("Catalog IDs must be unique")
         ids.add(entry["id"])

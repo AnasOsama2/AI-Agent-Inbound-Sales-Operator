@@ -23,6 +23,10 @@ class Decision(BaseModel):
     # Diagnostic only; never used as an authorization or evidence check.
     confidence: float | None = Field(default=None, ge=0, le=1)
     answer: str = Field(default="", max_length=4000)
+    acknowledgment: Literal[
+        "none", "happy_to_help", "understood", "thanks", "preference_noted", "no_pressure"
+    ] = "none"
+    include_service_details: bool = False
     rule_id: str | None = None
     question_kind: Literal[
         "none",
@@ -30,12 +34,18 @@ class Decision(BaseModel):
         "service",
         "contact",
         "preferred_time",
+        "preferred_day",
+        "preferred_clock_time",
         "requirements",
         "budget",
         "timeline",
         "identity",
         "variant",
         "product",
+        "price_or_booking",
+        "booking_interest",
+        "service_goal",
+        "comparison",
     ] = "none"
 
 

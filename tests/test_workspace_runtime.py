@@ -1,7 +1,52 @@
 from types import SimpleNamespace
 
+import pytest
 from salma.trust import Decision
 from salma.workspace_runtime import platform_handoff, render_workspace, snapshot_catalog
+
+
+@pytest.mark.parametrize(
+    "question,language,expected",
+    [
+        (
+            "preferred_clock_time",
+            "en",
+            "What time would you prefer? Staff will confirm availability.",
+        ),
+        ("preferred_day", "en", "Which day would you prefer? Staff will confirm availability."),
+        ("preferred_clock_time", "ar", "أنهي وقت مناسب ليك؟ الفريق هيأكد الموعد."),
+        ("preferred_day", "ar", "أنهي يوم مناسب ليك؟ الفريق هيأكد الموعد."),
+    ],
+)
+def test_appointment_followup_asks_only_for_the_missing_preference(question, language, expected):
+    decision = Decision(
+        intent="appointment", reply_kind="clarify", question_kind=question, language=language
+    )
+    assert render_workspace(decision, {}, {}, {}).text == expected
+
+
+def test_partial_appointment_preferences_are_preserved_in_customer_profile():
+    from salma.agent import ProfileArgs
+    from salma.db import Customer
+    from salma.store import update_customer
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    engine = create_engine("sqlite://")
+    Customer.__table__.create(engine)
+    with Session(engine) as db:
+        db.add(Customer(key="appointment", profile={"name": "Customer"}))
+        db.flush()
+        day = ProfileArgs(preferred_day="tomorrow").model_dump(exclude_none=True)
+        update_customer(db, "appointment", day)
+        clock = ProfileArgs(preferred_clock_time="4 PM").model_dump(exclude_none=True)
+        result = update_customer(db, "appointment", clock)
+        assert result == {
+            "name": "Customer",
+            "preferred_day": "tomorrow",
+            "preferred_clock_time": "4 PM",
+        }
+    engine.dispose()
 
 
 def test_identity_and_published_offer_are_not_human_requests():

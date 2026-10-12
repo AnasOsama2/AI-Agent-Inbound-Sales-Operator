@@ -1,6 +1,8 @@
 import asyncio
 import hmac
 import json
+import logging
+import time
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -23,6 +25,8 @@ from salma.db import (
     session,
 )
 from salma.evolution_channel import router as evolution_router
+from salma.monitoring import router as monitoring_router
+from salma.overview import router as overview_router
 from salma.platform_api import router as platform_router
 from salma.product_catalog import router as product_router
 from salma.product_imports import router as product_import_router
@@ -30,7 +34,31 @@ from salma.settings import settings
 from salma.store import accept, ownership
 from salma.workspace_services import router as workspace_router
 
+logging.basicConfig(level=logging.INFO, format="%(message)s")
 app = FastAPI(title="Salma", version="0.1.0")
+
+
+@app.middleware("http")
+async def request_diagnostics(request, call_next):
+    from salma.observability import emit
+
+    request_id, started = str(uuid4()), time.monotonic()
+    status = 500
+    try:
+        response = await call_next(request)
+        status = response.status_code
+        response.headers["X-Request-ID"] = request_id
+        return response
+    finally:
+        if request.url.path != "/health":
+            emit(
+                "http_request",
+                request_id=request_id,
+                method=request.method,
+                path=request.url.path,
+                status=status,
+                duration_ms=round((time.monotonic() - started) * 1000),
+            )
 
 
 @app.middleware("http")
@@ -379,3 +407,5 @@ app.include_router(workspace_router)
 app.include_router(conversation_router)
 app.include_router(product_import_router)
 app.include_router(evolution_router)
+app.include_router(overview_router)
+app.include_router(monitoring_router)
