@@ -1,4 +1,9 @@
 name: salma
+x-flow-logging: &flow-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
 services:
   redis:
     image: redis:7-alpine
@@ -24,6 +29,7 @@ services:
       timeout: 3s
       retries: 20
   api:
+    logging: *flow-logging
     build:
       context: .
       args: {INSTALL_KNOWLEDGE: "${INSTALL_KNOWLEDGE:-false}"}
@@ -44,6 +50,7 @@ services:
       db: {condition: service_healthy}
       redis: {condition: service_healthy}
   worker:
+    logging: *flow-logging
     build:
       context: .
       args: {INSTALL_KNOWLEDGE: "${INSTALL_KNOWLEDGE:-false}"}

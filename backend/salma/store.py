@@ -149,7 +149,17 @@ def ownership(db, key: str, action: str):
 
 
 def update_customer(db, customer_key: str, changes: dict):
-    allowed = {"name", "company", "email", "phone", "requirements", "budget", "timeline"}
+    allowed = {
+        "name",
+        "company",
+        "email",
+        "phone",
+        "requirements",
+        "budget",
+        "timeline",
+        "preferred_day",
+        "preferred_clock_time",
+    }
     if (
         not changes
         or not changes.keys() <= allowed

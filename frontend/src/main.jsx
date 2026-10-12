@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { requestAdminReply } from "./admin-chat.js";
 import ProductCatalog from "./ProductCatalog.jsx";
+import Overview from "./Overview.jsx";
+import Monitoring from "./Monitoring.jsx";
 import { ProviderTools, ChannelAccess, SocialConnections } from "./ProviderAccess.jsx";
 import {
   Leaf,
@@ -16,7 +18,6 @@ import {
   ArrowUp,
   Plus,
   LogOut,
-  Check,
   ChevronRight,
   ShieldCheck,
   RefreshCw,
@@ -33,6 +34,7 @@ const NAV = [
   ["Channels", Radio],
   ["Test Chat", MessagesSquare],
   ["Conversations", Inbox],
+  ["Monitoring", SlidersHorizontal],
 ];
 const list = (v, key) => (Array.isArray(v) ? v : v?.[key] || []);
 const pretty = (v) => JSON.stringify(v, null, 2);
@@ -44,6 +46,8 @@ const emptyService = () => ({
   price_type: "fixed",
   amount: 0,
   unit: "",
+  description: "",
+  description_ar: "",
   conditions: "",
   offers: [],
 });
@@ -101,6 +105,7 @@ function App() {
     [businesses, setBusinesses] = useState([]),
     [bid, setBid] = useState(""),
     [view, setView] = useState("Overview"),
+    [conversationTarget, setConversationTarget] = useState(null),
     [error, setError] = useState(""),
     [notice, setNotice] = useState(""),
     [busy, setBusy] = useState(false),
@@ -205,6 +210,7 @@ function App() {
   useEffect(() => {
     setDraft(null);
     setPublished(null);
+    setConversationTarget(null);
     setAdminMessages([]);
     setProposal(null);
     setAdminText("");
@@ -362,6 +368,7 @@ function App() {
               key={name}
               className={view === name ? "active" : ""}
               onClick={() => {
+                setConversationTarget(null);
                 setView(name);
                 setError("");
                 setNotice("");
@@ -437,109 +444,23 @@ function App() {
           <div className="page-scroll muted">Loading workspace…</div>
         ) : (
           <>
+            {view === "Monitoring" && <Monitoring api={api} base={base} operator={operator} />}
             {view === "Overview" && (
               <div className="page-scroll">
-                <section className="hero">
-                  <div>
-                    <p className="eyebrow">BUILT AROUND YOUR BUSINESS</p>
-                    <h2>
-                      Make Salma
-                      <br />
-                      one of your team.
-                    </h2>
-                    <p>
-                      Give her your knowledge, set clear boundaries,
-                      <br />
-                      and turn incoming questions into better conversations.
-                    </p>
-                    <button
-                      className="primary"
-                      onClick={() => setView("Setup Assistant")}
-                    >
-                      Continue setup
-                      <ChevronRight size={17} />
-                    </button>
-                  </div>
-                  <div className="hero-art">
-                    <div className="orbit">
-                      <Leaf size={55} />
-                    </div>
-                    <span className="art-chip">
-                      <ShieldCheck size={15} />
-                      Your rules, always
-                    </span>
-                  </div>
-                </section>
-                <div className="metric-grid">
-                  <Metric
-                    name="Knowledge sources"
-                    value={
-                      documents.filter(
-                        (d) =>
-                          d.approved && ["ready", "indexed"].includes(d.status),
-                      ).length
-                    }
-                    detail="Ready and approved"
-                  />
-                  <Metric
-                    name="Services"
-                    value={draft.catalog?.length || 0}
-                    detail="In your draft catalog"
-                  />
-                  <Metric
-                    name="Live channels"
-                    value={channels.filter((c) => c.live_enabled).length}
-                    detail="Explicitly activated"
-                  />
-                </div>
-                <section className="card">
-                  <div className="section-heading">
-                    <h2>Your path to launch</h2>
-                    <span className="muted">One step at a time</span>
-                  </div>
-                  <div className="checklist">
-                    {[
-                      [
-                        "Tell Salma about your business",
-                        !!draft.description,
-                        "Setup Assistant",
-                      ],
-                      [
-                        "Add and approve business knowledge",
-                        documents.some(
-                          (d) =>
-                            d.approved &&
-                            ["ready", "indexed"].includes(d.status),
-                        ),
-                        "Knowledge",
-                      ],
-                      [
-                        "Review services and prices",
-                        !!draft.catalog?.length,
-                        "Products & Services",
-                      ],
-                      [
-                        "Set sales and handoff rules",
-                        !!draft.handoff_rules?.length,
-                        "Agent Settings",
-                      ],
-                      ["Publish and test your agent", !!published, "Test Chat"],
-                      [
-                        "Connect and activate a channel",
-                        channels.some((c) => c.live_enabled),
-                        "Channels",
-                      ],
-                    ].map(([title, done, nav], i) => (
-                      <button key={title} onClick={() => setView(nav)}>
-                        <span className={`step ${done ? "done" : ""}`}>
-                          {done ? <Check size={15} /> : i + 1}
-                        </span>
-                        <span>{title}</span>
-                        <ChevronRight size={16} />
-                      </button>
-                    ))}
-                  </div>
-                </section>
+                <Overview
+                  key={bid}
+                  api={api}
+                  base={base}
+                  draft={draft}
+                  navigate={(name) => {
+                    setConversationTarget(null);
+                    setView(name);
+                  }}
+                  openConversation={(key) => {
+                    setConversationTarget(key);
+                    setView("Conversations");
+                  }}
+                />
                 {operator && (
                   <section className="card">
                     <h2>Platform operator</h2>
@@ -1014,6 +935,30 @@ function App() {
                           value={service.conditions}
                           onChange={(v) => edit("conditions", v)}
                         />
+                        <Field
+                          label="Service description (optional)"
+                          multiline
+                          maxLength={1000}
+                          placeholder="What the service includes and how it helps customers"
+                          value={service.description_en ?? service.description}
+                          onChange={(v) =>
+                            set(
+                              "catalog",
+                              draft.catalog.map((s, i) =>
+                                i === index
+                                  ? { ...s, description: v, description_en: v }
+                                  : s,
+                              ),
+                            )
+                          }
+                        />
+                        <Field
+                          label="Arabic description (optional)"
+                          multiline
+                          maxLength={1000}
+                          value={service.description_ar}
+                          onChange={(v) => edit("description_ar", v)}
+                        />
                       </div>
                       <OffersEditor
                         value={service.offers || []}
@@ -1468,7 +1413,8 @@ function App() {
             )}
             {(view === "Test Chat" || view === "Conversations") && (
               <Conversation
-                key={`${bid}:${view}`}
+                key={`${bid}:${view}:${conversationTarget || ""}`}
+                initialSelected={view === "Conversations" ? conversationTarget : null}
                 api={api}
                 base={base}
                 run={run}
@@ -1495,15 +1441,6 @@ function Brand() {
         <small>YOUR INBOUND SALES TEAM</small>
       </div>
     </div>
-  );
-}
-function Metric({ name, value, detail }) {
-  return (
-    <section className="metric">
-      <p className="muted">{name}</p>
-      <strong>{value}</strong>
-      <small>{detail}</small>
-    </section>
   );
 }
 function Empty({ title, text }) {
@@ -1908,9 +1845,9 @@ function DestinationSettings({ api, base, run }) {
     </details>
   );
 }
-function Conversation({ api, base, run, live, published }) {
+function Conversation({ api, base, run, live, published, initialSelected = null }) {
   const [items, setItems] = useState([]),
-    [selected, setSelected] = useState(null),
+    [selected, setSelected] = useState(initialSelected),
     [detail, setDetail] = useState(null),
     [text, setText] = useState(""),
     [busy, setBusy] = useState(false),
@@ -2185,6 +2122,15 @@ function Conversation({ api, base, run, live, published }) {
           {[...(detail?.events || [])].reverse().map((e) => (
             <details key={e.id}>
               <summary>{label(e.kind || e.type || "Event")}</summary>
+              {e.data?.trace_url && <p><a href={e.data.trace_url} target="_blank" rel="noreferrer">Open LangSmith trace ↗</a></p>}
+              {(e.data?.stages || []).map((stage, index) => (
+                <div className={`flow-stage ${stage.outputs?.supported === false || stage.error ? "rejected" : ""}`} key={index}>
+                  <strong>{label(stage.stage)}</strong> · {stage.duration_ms} ms
+                  {stage.outputs?.reason && <p>{stage.outputs.reason}</p>}
+                  {stage.error && <p className="error">{stage.error}</p>}
+                  <details><summary>Inputs and outputs</summary><pre>{pretty(stage)}</pre></details>
+                </div>
+              ))}
               {(e.data?.reason ||
                 e.data?.guard_reason ||
                 e.data?.handoff_reason) && (

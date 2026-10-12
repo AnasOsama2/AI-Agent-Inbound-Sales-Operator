@@ -4,7 +4,6 @@ import re
 import ssl
 import time
 from contextlib import contextmanager
-from uuid import uuid4
 
 import httpx
 from sqlalchemy import or_, select, text
@@ -14,6 +13,7 @@ from salma.agent import Agent, GroqCompletion, simulated_decision
 from salma.db import (
     Conversation,
     Customer,
+    Event,
     Knowledge,
     Message,
     Outbox,
@@ -23,6 +23,7 @@ from salma.db import (
     record_outgoing,
     session,
 )
+from salma.observability import diagnostics, emit, flow, phase
 from salma.settings import settings
 from salma.store import archive_draft, update_customer, update_draft
 from salma.trust import Decision, calculate, render, score
@@ -94,7 +95,9 @@ class Worker:
             else:
                 active_catalog = catalog(db)
             if name == "service_lookup":
-                return active_catalog[args["service_id"]]
+                from salma.workspace_runtime import lookup_service
+
+                return lookup_service(active_catalog, **args)
             if name == "calculator":
                 return {
                     "total": calculate(args["service_id"], args["quantity"], active_catalog),
@@ -168,6 +171,74 @@ class Worker:
         }
 
     def process_conversation(self, key):
+        return self._observed_conversation(key, delivery=False)
+
+    def _observed_conversation(self, key, *, delivery):
+        with session() as db:
+            query = select(Message).where(
+                Message.conversation_key == key, Message.direction == "incoming"
+            )
+            parent = None
+            if delivery:
+                item = db.scalar(
+                    select(Outbox)
+                    .where(
+                        Outbox.conversation_key == key, Outbox.status.in_(["pending", "sending"])
+                    )
+                    .order_by(Outbox.id)
+                    .limit(1)
+                )
+                if not item:
+                    return False
+                query = query.where(Message.id == item.message_id)
+            else:
+                query = query.where(Message.status == "pending")
+            message = db.scalar(query.order_by(Message.id).limit(1))
+            if not message:
+                return False
+            metadata = {
+                "message_id": message.id,
+                "business_id": message.business_id,
+                "correlation_id": message.correlation_id,
+                "config_version": message.config_version,
+            }
+            if delivery:
+                previous = db.scalar(
+                    select(Event.data)
+                    .where(
+                        Event.conversation_key == key,
+                        Event.correlation_id == message.correlation_id,
+                        Event.kind.in_(["flow_completed", "decision_validated"]),
+                    )
+                    .order_by(Event.id.desc())
+                    .limit(1)
+                )
+                previous = previous or {}
+                parent = previous.get("trace_parent") or previous.get("diagnostics", {}).get(
+                    "trace_parent"
+                )
+        with flow(metadata, name="salma.delivery" if delivery else "salma.message", parent=parent):
+            with phase("delivery" if delivery else "message_processing") as step:
+                handled = (self._deliver_conversation if delivery else self._process_conversation)(
+                    key, expected_message_id=message.id
+                )
+                step["handled"] = handled
+            if handled:
+                try:
+                    with session() as db:
+                        event(
+                            db,
+                            key,
+                            "delivery_flow_completed" if delivery else "flow_completed",
+                            diagnostics(),
+                            message.correlation_id,
+                        )
+                        db.commit()
+                except Exception as exc:
+                    emit("diagnostics_persistence_failed", error=type(exc).__name__)
+            return handled
+
+    def _process_conversation(self, key, *, expected_message_id=None):
         with conversation_lock(key) as acquired:
             if not acquired:
                 return False
@@ -184,6 +255,8 @@ class Worker:
                     .limit(1)
                 )
                 if not message:
+                    return False
+                if expected_message_id is not None and message.id != expected_message_id:
                     return False
                 if conversation.business_id != "legacy":
                     from salma.platform_models import Business
@@ -278,9 +351,12 @@ class Worker:
                 db.commit()
             started = time.monotonic()
             try:
-                result = self.generate(message, conversation, history)
+                with phase("generation") as step:
+                    result = self.generate(message, conversation, history)
+                    step["decision"] = result["decision"].model_dump()
                 decision = result["decision"]
             except Exception as exc:
+                emit("generation_failed", error=type(exc).__name__)
                 # Provider details can contain secrets or customer content; persist only class.
                 result = {"trace": [], "error": type(exc).__name__, "usage": []}
                 decision = Decision(
@@ -325,73 +401,86 @@ class Worker:
                     )
                     db.commit()
                     return True
-                evidence = {
-                    row.id: row.text
-                    for row in db.scalars(
-                        select(Knowledge).where(
-                            Knowledge.id.in_(decision.evidence_ids),
-                            Knowledge.business_id == current.business_id,
-                        )
-                    )
-                }
-                if current.business_id != "legacy":
-                    from salma.workspace_runtime import (
-                        published_profile_evidence,
-                        render_workspace,
-                        snapshot,
-                        snapshot_catalog,
-                    )
-
-                    version = snapshot(db, current.business_id, stored.config_version)
-                    allowed = set(version.document_ids)
+                with phase("reply_rendering") as step:
                     evidence = {
                         row.id: row.text
                         for row in db.scalars(
                             select(Knowledge).where(
                                 Knowledge.id.in_(decision.evidence_ids),
                                 Knowledge.business_id == current.business_id,
-                                Knowledge.document_id.in_(allowed),
                             )
                         )
                     }
-                    evidence.update(
-                        {
-                            row["id"]: row["text"]
-                            for row in published_profile_evidence(current.business_id, version)
-                            if row["id"] in decision.evidence_ids
-                        }
-                    )
-                    reply = render_workspace(
-                        decision, snapshot_catalog(version), evidence, version.config
-                    )
-                    if decision.reply_kind == "product":
-                        from salma.product_tools import (
-                            lookup,
-                            needs_variant_choice,
-                            render_products,
+                    if current.business_id != "legacy":
+                        from salma.workspace_runtime import (
+                            conversational_reply,
+                            published_profile_evidence,
+                            render_workspace,
+                            snapshot,
+                            snapshot_catalog,
                         )
 
-                        products = {}
-                        for sku in decision.product_skus:
-                            try:
-                                row = lookup(db, current.business_id, version, sku)
-                                products[sku.casefold()] = row
-                            except LookupError:
-                                pass
-                        if needs_variant_choice(
-                            db, current.business_id, version, message.text, list(products.values())
-                        ):
-                            decision = Decision(
-                                intent="variant_choice",
-                                language=decision.language,
-                                reply_kind="clarify",
-                                question_kind="variant",
+                        version = snapshot(db, current.business_id, stored.config_version)
+                        allowed = set(version.document_ids)
+                        evidence = {
+                            row.id: row.text
+                            for row in db.scalars(
+                                select(Knowledge).where(
+                                    Knowledge.id.in_(decision.evidence_ids),
+                                    Knowledge.business_id == current.business_id,
+                                    Knowledge.document_id.in_(allowed),
+                                )
                             )
-                            reply = render_workspace(decision, {}, {}, version.config)
-                        else:
-                            reply = render_products(decision, products)
-                else:
-                    reply = render(decision, catalog(db), evidence)
+                        }
+                        evidence.update(
+                            {
+                                row["id"]: row["text"]
+                                for row in published_profile_evidence(current.business_id, version)
+                                if row["id"] in decision.evidence_ids
+                            }
+                        )
+                        reply = render_workspace(
+                            decision,
+                            snapshot_catalog(version),
+                            evidence,
+                            version.config,
+                            service_details=result.get("service_details", {}),
+                        )
+                        if decision.reply_kind == "product":
+                            from salma.product_tools import (
+                                lookup,
+                                needs_variant_choice,
+                                render_products,
+                            )
+
+                            products = {}
+                            for sku in decision.product_skus:
+                                try:
+                                    row = lookup(db, current.business_id, version, sku)
+                                    products[sku.casefold()] = row
+                                except LookupError:
+                                    pass
+                            if needs_variant_choice(
+                                db,
+                                current.business_id,
+                                version,
+                                message.text,
+                                list(products.values()),
+                            ):
+                                decision = Decision(
+                                    intent="variant_choice",
+                                    language=decision.language,
+                                    reply_kind="clarify",
+                                    question_kind="variant",
+                                )
+                                reply = render_workspace(decision, {}, {}, version.config)
+                            else:
+                                reply = conversational_reply(
+                                    decision, render_products(decision, products)
+                                )
+                    else:
+                        reply = render(decision, catalog(db), evidence)
+                    step.update(text=reply.text, handoff=reply.handoff, reason=reply.reason)
                 signals = set(current.lead.get("signals", [])) | set(decision.lead_signals)
                 points, temperature = score(
                     signals, self.config.lead_weights, self.config.lead_thresholds
@@ -486,6 +575,7 @@ class Worker:
                         "mode": result.get("mode", self.config.agent_mode),
                         "usage": result.get("usage", []),
                         "error": result.get("error"),
+                        "diagnostics": diagnostics(),
                     },
                     message.correlation_id,
                 )
@@ -545,6 +635,9 @@ class Worker:
         return result
 
     def deliver_conversation(self, key):
+        return self._observed_conversation(key, delivery=True)
+
+    def _deliver_conversation(self, key, *, expected_message_id=None):
         with conversation_lock(key) as acquired:
             if not acquired:
                 return False
@@ -572,6 +665,11 @@ class Worker:
                 )
                 if not item:
                     return False
+                if expected_message_id is not None and item.message_id != expected_message_id:
+                    return False
+                correlation = db.scalar(
+                    select(Message.correlation_id).where(Message.id == item.message_id)
+                )
                 if item.status == "sending":
                     item.status = "ambiguous"
                     item.error = "Worker restarted after dispatch began; reconciliation required"
@@ -587,7 +685,7 @@ class Worker:
                         "reason": "delivery_reconciliation",
                         "outbox_id": item.id,
                     }
-                    event(db, key, "delivery_ambiguous", {"outbox_id": item.id}, str(uuid4()))
+                    event(db, key, "delivery_ambiguous", {"outbox_id": item.id}, correlation)
                     db.commit()
                     return True
                 if owner.business_id != "legacy" and item.config_version != active_version:
@@ -705,7 +803,7 @@ class Worker:
                                 key,
                                 "handoff_notification",
                                 result["handoff_notification"],
-                                str(uuid4()),
+                                correlation,
                             )
                     record_outgoing(db, item)
                 except httpx.HTTPStatusError as exc:
@@ -724,7 +822,7 @@ class Worker:
                         "provider_id": item.provider_id,
                         "error": item.error,
                     },
-                    str(uuid4()),
+                    correlation,
                 )
                 if item.status in ("failed", "ambiguous"):
                     conversation.ownership = "HANDOFF_PENDING"
@@ -770,12 +868,26 @@ class Worker:
 
 
 def main():
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    from threading import Event as StopEvent
+    from threading import Thread
+
+    from salma.monitoring import heartbeat
+
+    stop_heartbeat = StopEvent()
+
+    def pulse():
+        while not stop_heartbeat.is_set():
+            heartbeat()
+            stop_heartbeat.wait(5)
+
+    Thread(target=pulse, name="salma-heartbeat", daemon=True).start()
     worker = Worker()
     while True:
         try:
             if not worker.tick():
                 time.sleep(0.5)
+            heartbeat(completed=True)
         except SQLAlchemyError:
             logger.error("Database unavailable; retrying without acknowledging pending work")
             time.sleep(3)

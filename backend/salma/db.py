@@ -189,6 +189,16 @@ def event(db, key, kind, data, correlation):
             correlation_id=correlation,
         )
     )
+    from salma.observability import emit
+
+    emit(
+        kind,
+        business_id=business_id,
+        config_version=version,
+        correlation_id=correlation,
+        data=data,
+        persistence="staged",
+    )
 
 
 def record_outgoing(db, item):
